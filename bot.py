@@ -1,39 +1,27 @@
-# bot.py
 import os
 import json
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
 from dotenv import load_dotenv
 
-# Загружаем .env из текущей папки
+# Загружаем переменные из .env (если есть)
 load_dotenv()
+WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", "mysecret123")
 
-WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", "mysecret123").strip()
+app = FastAPI()
 
-app = FastAPI(title="TV-Bybit Bot", version="1.0.0")
+# ==========================
+# Утилита маскировки токена
+# ==========================
+def mask_token(token: str) -> str:
+    if not token:
+        return None
+    if len(token) <= 4:
+        return "*" * len(token)
+    return token[:2] + "*" * (len(token) - 4) + token[-2:]
 
-# ================== ЛОГИРОВАНИЕ КАЖДОГО ЗАПРОСА ==================
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    try:
-        body = await request.body()
-        print(f"➡️  {request.method} {request.url}")
-        if body:
-            print(f"    body: {body.decode('utf-8', 'ignore')}")
-        response = await call_next(request)
-        print(f"⬅️  {response.status_code} {request.url.path}")
-        return response
-    except Exception as e:
-        print(f"💥 Middleware error: {e}")
-        return JSONResponse({"detail": "Middleware error"}, status_code=500)
-
-# ================== ВСПОМОГАТЕЛЬНОЕ ==================
-def mask_token(tok: str) -> str:
-    if len(tok) <= 4:
-        return "***"
-    return tok[:2] + "*" * (len(tok) - 4) + tok[-2:]
-
-# ================== РОУТЫ ДЛЯ ПРОВЕРКИ ==================
+# ==========================
+# Базовые эндпоинты
+# ==========================
 @app.get("/")
 def root():
     return {
@@ -53,54 +41,51 @@ def info():
         "token_masked": mask_token(WEBHOOK_TOKEN)
     }
 
-# ================== ВЕБХУКИ ==================
+# ==========================
+# Вебхуки
+# ==========================
 @app.post("/tv_webhook")
-async def tv_webhook(request: Request):
-    # Токен через query-параметр ?token=...
-    token = request.query_params.get("token", "")
+async def tv_webhook(request: Request, token: str = None):
+    """Приём вебхука через query-параметр ?token=..."""
     if token != WEBHOOK_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid webhook token")
+        return {"status": "error", "message": "Invalid webhook token"}
 
-    raw = await request.body()
-    if not raw:
-        raise HTTPException(status_code=400, detail="Empty body")
-
+    body = await request.body()
     try:
-        data = json.loads(raw.decode())
+        data = json.loads(body.decode())
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
+        return {"status": "error", "message": "Invalid JSON"}
 
-    print("📩 Пришел сигнал (query-token):", data)
+    print("📩 Получен сигнал:", data)
 
     symbol = data.get("symbol", "CYBERUSDT")
-    side   = data.get("side")
+    side   = data.get("side", "buy")
     qty    = float(data.get("qty", 0.01))
     reason = data.get("reason", "signal")
 
-    print(f"✅ SIGNAL: side={side} qty={qty} symbol={symbol} reason={reason}")
+    print(f"✅ {side.upper()} {qty} {symbol} | reason: {reason}")
+
     return {"status": "success", "received": data}
 
 @app.post("/webhook/{token}")
-async def webhook_path(token: str, request: Request):
-    # Токен в path
+async def webhook(token: str, request: Request):
+    """Приём вебхука через путь /webhook/<token>"""
     if token != WEBHOOK_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid webhook token")
+        return {"status": "error", "message": "Invalid webhook token"}
 
-    raw = await request.body()
-    if not raw:
-        raise HTTPException(status_code=400, detail="Empty body")
-
+    body = await request.body()
     try:
-        data = json.loads(raw.decode())
+        data = json.loads(body.decode())
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
+        return {"status": "error", "message": "Invalid JSON"}
 
-    print("📩 Пришел сигнал (path-token):", data)
+    print("📩 Получен сигнал:", data)
 
     symbol = data.get("symbol", "CYBERUSDT")
-    side   = data.get("side")
+    side   = data.get("side", "buy")
     qty    = float(data.get("qty", 0.01))
     reason = data.get("reason", "signal")
 
-    print(f"✅ SIGNAL: side={side} qty={qty} symbol={symbol} reason={reason}")
+    print(f"✅ {side.upper()} {qty} {symbol} | reason: {reason}")
+
     return {"status": "success", "received": data}
