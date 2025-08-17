@@ -1,12 +1,12 @@
+import logging
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import JSONResponse
 from pybit.unified_trading import HTTP
-import logging
 
 # === Настройка FastAPI ===
 app = FastAPI()
 
-# === Логи ===
+# === Настройка логов ===
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -14,26 +14,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tradingview_bot")
 
-# === Секретный токен ===
+# === Секрет для TradingView ===
 SECRET_TOKEN = "mysecret123"
 
-# === API ключи Bybit (замени на свои!) ===
-API_KEY = "ТВОЙ_API_KEY"
-API_SECRET = "ТВОЙ_API_SECRET"
+# === API ключи Bybit (⚠️ ТУТ ВПИШИ СВОИ) ===
+API_KEY = "CN4jydkkSArRVvzgTD"
+API_SECRET = "JdXh8mh0cBq68ZvvjjEwCTgVBhY7EPbX2kTu"
 
-# === Сессия Bybit ===
+# === Подключение к Bybit ===
 session = HTTP(
-    testnet=True,  # ⚠️ Поставь False для реала
+    testnet=True,   # ⚠️ True = тестовая среда, False = реальная торговля
     api_key=API_KEY,
     api_secret=API_SECRET
 )
 
-# === Домашняя страница ===
+# === Константа: мы торгуем только CYBERUSDT ===
+SYMBOL = "CYBERUSDT"
+
+
 @app.get("/")
 async def root():
     return {"msg": "Server alive"}
 
-# === Инфо (проверка что бот работает) ===
+
 @app.get("/info")
 async def info():
     return {
@@ -42,63 +45,62 @@ async def info():
             "home": "/",
             "info": "/info",
             "swagger": "/docs",
-            "webhook_query": "/tv_webhook?token=<YOUR_TOKEN>",
-            "webhook_path": "/webhook/<YOUR_TOKEN>"
+            "webhook": "/tv_webhook?token=<YOUR_TOKEN>"
         },
-        "your_token": SECRET_TOKEN
+        "your_token": SECRET_TOKEN,
+        "trading_symbol": SYMBOL
     }
 
-# === Вебхук от TradingView ===
+
 @app.post("/tv_webhook")
 async def tv_webhook(request: Request, token: str = Query(...)):
+    # === Проверка токена ===
     if token != SECRET_TOKEN:
         logger.warning("❌ Invalid token in request")
         return JSONResponse(status_code=403, content={"error": "Invalid token"})
 
+    # === Парсим payload ===
     try:
         payload = await request.json()
+        logger.info(f"📩 New alert received: {payload}")
     except Exception:
         logger.error("⚠️ Failed to parse JSON payload")
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
 
-    logger.info(f"📩 Alert received: {payload}")
-
-    # === Фиксируем тикер только на CYBERUSDT ===
-    symbol = "CYBERUSDT"
-    action = payload.get("action")
-    qty = float(payload.get("qty", 0.01))  # если не передали qty — берём 0.01
+    # === Извлекаем действие и параметры ===
+    action = str(payload.get("action", "")).upper()   # BUY / SELL / CLOSE
+    qty = float(payload.get("qty", 1))               # размер позиции
 
     try:
         if action == "BUY":
             session.place_order(
                 category="linear",
-                symbol=symbol,
+                symbol=SYMBOL,
                 side="Buy",
                 order_type="Market",
                 qty=qty
             )
-            logger.info("✅ Открыл LONG по CYBERUSDT")
+            logger.info(f"✅ Открыл LONG {SYMBOL} qty={qty}")
 
         elif action == "SELL":
             session.place_order(
                 category="linear",
-                symbol=symbol,
+                symbol=SYMBOL,
                 side="Sell",
                 order_type="Market",
                 qty=qty
             )
-            logger.info("✅ Открыл SHORT по CYBERUSDT")
+            logger.info(f"✅ Открыл SHORT {SYMBOL} qty={qty}")
 
-        elif action in ["CLOSE_LONG", "CLOSE_SHORT"]:
-            session.cancel_all_orders(category="linear", symbol=symbol)
-            logger.info("🔴 Закрыл все ордера по CYBERUSDT")
+        elif action == "CLOSE":
+            session.cancel_all_orders(category="linear", symbol=SYMBOL)
+            logger.info(f"🔴 Закрыл все ордера {SYMBOL}")
 
         else:
             logger.warning(f"⚠️ Неизвестное действие: {action}")
-            return JSONResponse(status_code=400, content={"error": "Unknown action"})
 
     except Exception as e:
-        logger.error(f"⚠️ Ошибка при торговле: {e}")
+        logger.error(f"❌ Ошибка при торговле: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
     return {"status": "ok", "received": payload}
