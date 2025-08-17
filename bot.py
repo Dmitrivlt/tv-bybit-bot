@@ -1,23 +1,41 @@
-import os
-import json
-from fastapi import FastAPI, Request
-from dotenv import load_dotenv
+from fastapi import FastAPI, Request, Query
+from fastapi.responses import JSONResponse
+from pybit.unified_trading import HTTP
+import logging
 
-# Загружаем переменные окружения
-load_dotenv()
-WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", "mysecret123")
-
+# === Настройка FastAPI ===
 app = FastAPI()
 
-# ==========================
-# Базовые эндпоинты
-# ==========================
-@app.get("/")
-def root():
-    return {"ok": True, "hint": "См. /info и /docs"}
+# === Логи ===
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("tradingview_bot")
 
+# === Секретный токен ===
+SECRET_TOKEN = "mysecret123"
+
+# === API ключи Bybit (замени на свои!) ===
+API_KEY = "ТВОЙ_API_KEY"
+API_SECRET = "ТВОЙ_API_SECRET"
+
+# === Сессия Bybit ===
+session = HTTP(
+    testnet=True,  # ⚠️ Поставь False для реала
+    api_key=API_KEY,
+    api_secret=API_SECRET
+)
+
+# === Домашняя страница ===
+@app.get("/")
+async def root():
+    return {"msg": "Server alive"}
+
+# === Инфо (проверка что бот работает) ===
 @app.get("/info")
-def info():
+async def info():
     return {
         "ok": True,
         "endpoints": {
@@ -27,40 +45,60 @@ def info():
             "webhook_query": "/tv_webhook?token=<YOUR_TOKEN>",
             "webhook_path": "/webhook/<YOUR_TOKEN>"
         },
-        "your_token": WEBHOOK_TOKEN
+        "your_token": SECRET_TOKEN
     }
 
-# ==========================
-# Вебхуки
-# ==========================
+# === Вебхук от TradingView ===
 @app.post("/tv_webhook")
-async def tv_webhook(request: Request, token: str = None):
-    if token != WEBHOOK_TOKEN:
-        return {"status": "error", "message": "Invalid webhook token"}
+async def tv_webhook(request: Request, token: str = Query(...)):
+    if token != SECRET_TOKEN:
+        logger.warning("❌ Invalid token in request")
+        return JSONResponse(status_code=403, content={"error": "Invalid token"})
 
-    data = await request.json()
-    print("📩 Получен сигнал:", data)
+    try:
+        payload = await request.json()
+    except Exception:
+        logger.error("⚠️ Failed to parse JSON payload")
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
 
-    symbol = data.get("symbol", "CYBERUSDT")
-    side   = data.get("side", "buy")
-    qty    = float(data.get("qty", 0.01))
-    reason = data.get("reason", "signal")
+    logger.info(f"📩 Alert received: {payload}")
 
-    print(f"✅ {side.upper()} {qty} {symbol} | reason: {reason}")
-    return {"status": "success", "received": data}
+    # === Фиксируем тикер только на CYBERUSDT ===
+    symbol = "CYBERUSDT"
+    action = payload.get("action")
+    qty = float(payload.get("qty", 0.01))  # если не передали qty — берём 0.01
 
-@app.post("/webhook/{token}")
-async def webhook(token: str, request: Request):
-    if token != WEBHOOK_TOKEN:
-        return {"status": "error", "message": "Invalid webhook token"}
+    try:
+        if action == "BUY":
+            session.place_order(
+                category="linear",
+                symbol=symbol,
+                side="Buy",
+                order_type="Market",
+                qty=qty
+            )
+            logger.info("✅ Открыл LONG по CYBERUSDT")
 
-    data = await request.json()
-    print("📩 Получен сигнал:", data)
+        elif action == "SELL":
+            session.place_order(
+                category="linear",
+                symbol=symbol,
+                side="Sell",
+                order_type="Market",
+                qty=qty
+            )
+            logger.info("✅ Открыл SHORT по CYBERUSDT")
 
-    symbol = data.get("symbol", "CYBERUSDT")
-    side   = data.get("side", "buy")
-    qty    = float(data.get("qty", 0.01))
-    reason = data.get("reason", "signal")
+        elif action in ["CLOSE_LONG", "CLOSE_SHORT"]:
+            session.cancel_all_orders(category="linear", symbol=symbol)
+            logger.info("🔴 Закрыл все ордера по CYBERUSDT")
 
-    print(f"✅ {side.upper()} {qty} {symbol} | reason: {reason}")
-    return {"status": "success", "received": data}
+        else:
+            logger.warning(f"⚠️ Неизвестное действие: {action}")
+            return JSONResponse(status_code=400, content={"error": "Unknown action"})
+
+    except Exception as e:
+        logger.error(f"⚠️ Ошибка при торговле: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    return {"status": "ok", "received": payload}
