@@ -3,42 +3,31 @@ import json
 from fastapi import FastAPI, Request
 from dotenv import load_dotenv
 
-# Загружаем переменные из .env (если есть)
+# Загружаем переменные окружения
 load_dotenv()
 WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", "mysecret123")
 
 app = FastAPI()
 
 # ==========================
-# Утилита маскировки токена
-# ==========================
-def mask_token(token: str) -> str:
-    if not token:
-        return None
-    if len(token) <= 4:
-        return "*" * len(token)
-    return token[:2] + "*" * (len(token) - 4) + token[-2:]
-
-# ==========================
 # Базовые эндпоинты
 # ==========================
 @app.get("/")
 def root():
-    return {
-        "ok": True,
-        "hint": "См. /info и /docs для инструкций",
-    }
+    return {"ok": True, "hint": "См. /info и /docs"}
 
 @app.get("/info")
 def info():
     return {
         "ok": True,
         "endpoints": {
+            "home": "/",
+            "info": "/info",
+            "swagger": "/docs",
             "webhook_query": "/tv_webhook?token=<YOUR_TOKEN>",
-            "webhook_path": "/webhook/<YOUR_TOKEN>",
-            "docs": "/docs"
+            "webhook_path": "/webhook/<YOUR_TOKEN>"
         },
-        "token_masked": mask_token(WEBHOOK_TOKEN)
+        "your_token": WEBHOOK_TOKEN
     }
 
 # ==========================
@@ -46,16 +35,10 @@ def info():
 # ==========================
 @app.post("/tv_webhook")
 async def tv_webhook(request: Request, token: str = None):
-    """Приём вебхука через query-параметр ?token=..."""
     if token != WEBHOOK_TOKEN:
         return {"status": "error", "message": "Invalid webhook token"}
 
-    body = await request.body()
-    try:
-        data = json.loads(body.decode())
-    except Exception:
-        return {"status": "error", "message": "Invalid JSON"}
-
+    data = await request.json()
     print("📩 Получен сигнал:", data)
 
     symbol = data.get("symbol", "CYBERUSDT")
@@ -64,21 +47,14 @@ async def tv_webhook(request: Request, token: str = None):
     reason = data.get("reason", "signal")
 
     print(f"✅ {side.upper()} {qty} {symbol} | reason: {reason}")
-
     return {"status": "success", "received": data}
 
 @app.post("/webhook/{token}")
 async def webhook(token: str, request: Request):
-    """Приём вебхука через путь /webhook/<token>"""
     if token != WEBHOOK_TOKEN:
         return {"status": "error", "message": "Invalid webhook token"}
 
-    body = await request.body()
-    try:
-        data = json.loads(body.decode())
-    except Exception:
-        return {"status": "error", "message": "Invalid JSON"}
-
+    data = await request.json()
     print("📩 Получен сигнал:", data)
 
     symbol = data.get("symbol", "CYBERUSDT")
@@ -87,5 +63,4 @@ async def webhook(token: str, request: Request):
     reason = data.get("reason", "signal")
 
     print(f"✅ {side.upper()} {qty} {symbol} | reason: {reason}")
-
     return {"status": "success", "received": data}
