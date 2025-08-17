@@ -1,22 +1,11 @@
 import os
 import json
-import ccxt
 from fastapi import FastAPI, Request
 from dotenv import load_dotenv
 
-# Загружаем ключи из .env
+# Загружаем переменные из .env
 load_dotenv()
-API_KEY = os.getenv("BYBIT_API_KEY")
-API_SECRET = os.getenv("BYBIT_API_SECRET")
-
-# Подключаемся к Bybit (Testnet)
-exchange = ccxt.bybit({
-    "apiKey": API_KEY,
-    "secret": API_SECRET,
-    "enableRateLimit": True,
-    "options": {"defaultType": "swap"},  # деривативы USDT
-})
-exchange.set_sandbox_mode(True)  # <<< ВАЖНО: используем testnet
+WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", "mysecret123")
 
 app = FastAPI()
 
@@ -26,37 +15,24 @@ def home():
 
 @app.post("/webhook/{token}")
 async def webhook(token: str, request: Request):
+    # Проверяем секрет
+    if token != WEBHOOK_TOKEN:
+        return {"status": "error", "message": "Invalid token"}
+
+    # Читаем тело запроса
     body = await request.body()
     data = json.loads(body.decode())
 
+    # Логируем полученный сигнал
+    print("📩 Получен сигнал:", data)
+
+    # Достаём значения
     symbol = data.get("symbol", "CYBERUSDT")
     side   = data.get("side")
     qty    = float(data.get("qty", 0.01))
     reason = data.get("reason", "signal")
 
-    try:
-        if side == "buy":
-            order = exchange.create_market_buy_order(symbol, qty)
-        elif side == "sell":
-            order = exchange.create_market_sell_order(symbol, qty)
-        elif side == "close":
-            # закрываем все позиции (рыночный ордер в противоположную сторону)
-            pos = exchange.fetch_positions([symbol])
-            if pos and float(pos[0]["contracts"]) != 0:
-                if pos[0]["side"] == "long":
-                    order = exchange.create_market_sell_order(symbol, qty)
-                elif pos[0]["side"] == "short":
-                    order = exchange.create_market_buy_order(symbol, qty)
-                else:
-                    order = {"info": "no open position"}
-            else:
-                order = {"info": "flat"}
-        else:
-            order = {"error": f"Unknown side: {side}"}
+    # На этом этапе мы пока не торгуем — только печать
+    print(f"✅ {side.upper()} {qty} {symbol} | reason: {reason}")
 
-        print(f"✅ {side.upper()} {qty} {symbol} | reason: {reason}")
-        return {"status": "success", "order": order}
-
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return {"status": "error", "message": str(e)}
+    return {"status": "success", "received": data}
