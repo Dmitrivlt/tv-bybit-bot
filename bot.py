@@ -1,37 +1,37 @@
 import os
 import logging
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from pybit.unified_trading import HTTP
 
 # =========================
-# Настройка логов
+# ЛОГИ
 # =========================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
+log = logging.getLogger("tv_bybit_bot")
 
 # =========================
-# Загружаем .env
+# .ENV
 # =========================
 load_dotenv()
 
-WEBHOOK_TOKEN   = os.getenv("WEBHOOK_TOKEN")
-BYBIT_API_KEY   = os.getenv("BYBIT_API_KEY")
-BYBIT_API_SECRET= os.getenv("BYBIT_API_SECRET")
-BYBIT_TESTNET   = os.getenv("BYBIT_TESTNET", "true").lower() == "true"
-ENABLE_TRADING  = os.getenv("ENABLE_TRADING", "true").lower() == "true"
+WEBHOOK_TOKEN     = os.getenv("WEBHOOK_TOKEN")
+BYBIT_API_KEY     = os.getenv("BYBIT_API_KEY")
+BYBIT_API_SECRET  = os.getenv("BYBIT_API_SECRET")
+BYBIT_TESTNET     = os.getenv("BYBIT_TESTNET", "true").lower() == "true"
+ENABLE_TRADING    = os.getenv("ENABLE_TRADING", "true").lower() == "true"
 
-DEFAULT_LEVERAGE= int(os.getenv("DEFAULT_LEVERAGE", 1))
-DEFAULT_SL_PCT  = float(os.getenv("DEFAULT_SL_PCT", 20))
-SYMBOL          = os.getenv("SYMBOL", "SOLUSDT")
+DEFAULT_LEVERAGE  = int(os.getenv("DEFAULT_LEVERAGE", 50))
+DEFAULT_SL_PCT    = float(os.getenv("DEFAULT_SL_PCT", 20))
+SYMBOL            = os.getenv("SYMBOL", "USDCUSDT")
 
 # =========================
-# Bybit client
+# Bybit client (Unified Trading)
 # =========================
-base_url = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
-
 session = HTTP(
     testnet=BYBIT_TESTNET,
     api_key=BYBIT_API_KEY,
@@ -41,55 +41,80 @@ session = HTTP(
 # =========================
 # FastAPI
 # =========================
-app = FastAPI()
+app = FastAPI(
+    title="TV→Bybit Bot",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url=None
+)
 
 # =========================
-# Проверка и установка плеча
+# Вспомогательные
 # =========================
-def ensure_leverage(symbol: str, leverage: int):
+def ensure_leverage_once(symbol: str, leverage: int):
+    """
+    Проверяем текущее плечо по позиции.
+    Если уже такое же — ничего не делаем.
+    Если другое — один раз пробуем установить.
+    """
     try:
-        # Получаем текущие данные инструмента
         info = session.get_instruments_info(category="linear", symbol=symbol)
-        logging.info(f"ℹ️ Instruments info: {info}")
+        log.info(f"ℹ️ Instruments info for {symbol}: {info}")
 
-        # Получаем текущие позиции, чтобы узнать плечо
         pos = session.get_positions(category="linear", symbol=symbol)
-        if pos["retCode"] == 0 and pos["result"]["list"]:
-            current_lev = int(float(pos["result"]["list"][0]["leverage"]))
+        if pos.get("retCode") == 0 and pos["result"]["list"]:
+            current = pos["result"]["list"][0].get("leverage")
+            try:
+                current_lev = int(float(current))
+            except Exception:
+                current_lev = None
+
             if current_lev == leverage:
-                logging.warning(f"⚠️ Leverage already set to {leverage}x, skipping update.")
+                log.warning(f"⚠️ Leverage already {leverage}x, skip set.")
                 return
-        # Если другое — меняем
+
         res = session.set_leverage(
             category="linear",
             symbol=symbol,
             buyLeverage=str(leverage),
             sellLeverage=str(leverage)
         )
-        if res["retCode"] == 0:
-            logging.info(f"✅ Leverage set to {leverage}x for {symbol}")
+        if res.get("retCode") == 0:
+            log.info(f"✅ Leverage set to {leverage}x for {symbol}")
         else:
-            logging.error(f"❌ Ошибка при установке плеча: {res}")
+            log.error(f"❌ Set leverage error: {res}")
     except Exception as e:
-        logging.error(f"❌ Не удалось проверить/установить плечо: {e}")
+        log.error(f"❌ ensure_leverage_once failed: {e}")
 
-# =========================
-# Маркет-ордер
-# =========================
 def place_market_order(symbol: str, side: str, sl_pct: float):
+    """
+    РЫНОЧНЫЙ вход со 100% доступного USDT (уточни логику при необходимости),
+    плюс установка стоп-лосса в процентах.
+    side: 'Buy' или 'Sell'
+    """
     try:
-        balance = session.get_wallet_balance(accountType="UNIFIED")
-        usdt_balance = float(balance["result"]["list"][0]["coin"][0]["walletBalance"])
-        logging.info(f"💰 Баланс USDT: {usdt_balance}")
+        # Баланс (Unified)
+        bal = session.get_wallet_balance(accountType="UNIFIED")
+        usdt = 0.0
+        if bal.get("retCode") == 0:
+            coins = bal["result"]["list"][0].get("coin", [])
+            for c in coins:
+                if c.get("coin") == "USDT":
+                    usdt = float(c.get("walletBalance", 0))
+                    break
+        log.info(f"💰 USDT balance: {usdt}")
 
-        # Цена для расчета количества
-        ticker = session.get_ticker(category="linear", symbol=symbol)
-        last_price = float(ticker["result"]["list"][0]["lastPrice"])
+        # Тикер
+        tk = session.get_ticker(category="linear", symbol=symbol)
+        last_price = float(tk["result"]["list"][0]["lastPrice"])
+        # Количество базового актива на весь баланс (упрощённо)
+        qty = round(usdt / last_price, 2)
+        if qty <= 0:
+            raise RuntimeError("Insufficient balance to place market order")
 
-        qty = round(usdt_balance / last_price, 2)
-        logging.info(f"📊 Рассчитанное количество {qty} {symbol.split('USDT')[0]}")
+        log.info(f"📊 qty={qty} {symbol.split('USDT')[0]} @ ~{last_price}")
 
-        # Ордера
+        # Рыночный ордер
         order = session.place_order(
             category="linear",
             symbol=symbol,
@@ -100,48 +125,95 @@ def place_market_order(symbol: str, side: str, sl_pct: float):
             reduceOnly=False,
             closeOnTrigger=False
         )
-        logging.info(f"✅ Market {side} ордер отправлен: {order}")
+        log.info(f"✅ Market {side} sent: {order}")
 
-        # Добавляем стоп-лосс
+        # Стоп-лосс (по цене входа на момент отправки; биржа привяжет к позиции)
         if sl_pct > 0:
             sl_price = last_price * (1 - sl_pct / 100) if side == "Buy" else last_price * (1 + sl_pct / 100)
             sl_order = session.set_trading_stop(
                 category="linear",
                 symbol=symbol,
-                stopLoss=str(round(sl_price, 2))
+                stopLoss=str(round(sl_price, 4))
             )
-            logging.info(f"🛑 Stop Loss установлен: {sl_order}")
+            log.info(f"🛑 Stop Loss set: {sl_order}")
 
     except Exception as e:
-        logging.error(f"❌ Ошибка при выставлении ордера: {e}")
+        log.error(f"❌ place_market_order error: {e}")
+        raise
 
 # =========================
-# Webhook
+# Роуты
 # =========================
+@app.get("/")
+def home():
+    return JSONResponse(
+        {"ok": True, "msg": "TV→Bybit bot is running. See /info and /docs"}
+    )
+
+@app.get("/info")
+def info():
+    return {
+        "ok": True,
+        "symbol":       SYMBOL,
+        "testnet":      BYBIT_TESTNET,
+        "enableTrade":  ENABLE_TRADING,
+        "defaultLev":   DEFAULT_LEVERAGE,
+        "defaultSLpct": DEFAULT_SL_PCT,
+        "endpoints": {
+            "health": "/",
+            "info":   "/info",
+            "docs":   "/docs",
+            "tv_webhook": "/tv_webhook?token=<WEBHOOK_TOKEN>",
+            "webhook":    "/webhook (Authorization header)"
+        }
+    }
+
+# Вебхук c токеном в заголовке Authorization (вариант для curl/Postman)
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
     token = request.headers.get("Authorization")
-
     if token != WEBHOOK_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(status_code=401, detail="Unauthorized (header)")
 
-    logging.info(f"📩 Получен сигнал: {data}")
+    log.info(f"📩 /webhook payload: {data}")
 
-    if ENABLE_TRADING:
-        side = data.get("side")  # "Buy" или "Sell"
-        if side in ["Buy", "Sell"]:
-            place_market_order(SYMBOL, side, DEFAULT_SL_PCT)
-        else:
-            logging.warning("⚠️ Неверный сигнал (нет side).")
-    else:
-        logging.info("🚫 Торговля выключена (ENABLE_TRADING=false).")
+    if not ENABLE_TRADING:
+        log.info("🚫 Trading disabled (ENABLE_TRADING=false)")
+        return {"status": "ok", "trading": "disabled"}
 
-    return {"status": "ok"}
+    side = data.get("side")
+    if side not in ["Buy", "Sell"]:
+        raise HTTPException(status_code=400, detail="Bad payload: missing side Buy/Sell")
+
+    place_market_order(SYMBOL, side, DEFAULT_SL_PCT)
+    return {"status": "ok", "symbol": SYMBOL, "side": side}
+
+# Вебхук c токеном в query (?token=...) — удобен для TradingView
+@app.post("/tv_webhook")
+async def tv_webhook(request: Request, token: str = Query(None)):
+    if token != WEBHOOK_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized (token)")
+
+    data = await request.json()
+    log.info(f"📩 /tv_webhook payload: {data}")
+
+    if not ENABLE_TRADING:
+        log.info("🚫 Trading disabled (ENABLE_TRADING=false)")
+        return {"status": "ok", "trading": "disabled"}
+
+    side = data.get("side")
+    if side not in ["Buy", "Sell"]:
+        raise HTTPException(status_code=400, detail="Bad payload: missing side Buy/Sell")
+
+    place_market_order(SYMBOL, side, DEFAULT_SL_PCT)
+    return {"status": "ok", "symbol": SYMBOL, "side": side, "source": "tv"}
 
 # =========================
-# При старте — проверка плеча
+# Стартовые действия
 # =========================
 @app.on_event("startup")
-async def startup_event():
-    ensure_leverage(SYMBOL, DEFAULT_LEVERAGE)
+async def on_startup():
+    # Один раз пытаемся установить плечо (если уже 50 — просто пропустим)
+    ensure_leverage_once(SYMBOL, DEFAULT_LEVERAGE)
+    log.info("🚀 Startup complete")
