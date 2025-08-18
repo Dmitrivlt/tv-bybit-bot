@@ -1,7 +1,5 @@
 fastapi==0.112.2
 uvicorn==0.30.6
 pydantic==2.9.0
-ccxt==4.5.0
-pybit==5.8.0
 python-dotenv==1.0.1
-
+pybit==5.8.0
